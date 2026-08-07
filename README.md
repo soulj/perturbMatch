@@ -9,6 +9,11 @@ result) against a reference database of perturbation signatures and scores
 which perturbed regulators best explain your data, using cosine, GSEA and
 signed-Jaccard similarity.
 
+<img src="man/figures/README-similarity.png" alt="Lollipop plot ranking the top mimicking and reversing gene perturbations by similarity Z score" width="600" />
+
+*Regulators whose perturbation signature most resembles (orange) or opposes
+(blue) the query, with marker shape showing gain- or loss-of-function.*
+
 ## Installation
 
 ```r
