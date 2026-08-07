@@ -1,0 +1,11 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.claude$
+^\.github$
+^.*\.BiocCheck$
+^.*\.Rcheck$
+^.*\.tar\.gz$
+^Rplots\.pdf$
+^vignettes/.*_files$
+^vignettes/.*\.rmarkdown$
+^vignettes/\.quarto$

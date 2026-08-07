@@ -1,0 +1,953 @@
+---
+title: >
+  Matching a differential expression signature to perturbation references
+  using perturbMatch
+author:
+- name: Jamie Soul
+  affiliation:
+  - Biochemistry, Cell and Systems Biology, Institute of Systems, Molecular
+    & Integrative Biology, Faculty of Health and Life Sciences
+  email: jamie.soul@liverpool.ac.uk
+date: "`r Sys.Date()`"
+package: perturbMatch
+output:
+  BiocStyle::html_document:
+    titlecaps: false
+    toc: true
+    toc_float: true
+    number_sections: true
+abstract: >
+  perturbMatch matches a transcriptomics signature against a reference
+  database of single-gene perturbation signatures, asking what
+  transcriptional regulators could be driving the gene expression changes
+  observed in an experiment. A query
+  signature (a differential expression result, or a simple set of
+  up/down-regulated genes) is compared against a large reference collection of
+  single-gene perturbation signatures using one of several enrichment methods,
+  and candidate regulators are ranked by similarity to the query. This vignette
+  walks through preparing input data, scoring it against a small demonstration
+  reference database, and visualising the results.
+vignette: >
+  %\VignetteIndexEntry{perturbMatch}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+---
+
+```{r style, echo=FALSE, results='hide', message=FALSE}
+library(BiocStyle)
+library(knitr)
+opts_chunk$set(error = FALSE, message = FALSE, warning = FALSE)
+opts_chunk$set(fig.asp = 1)
+```
+
+# Installation
+
+```{r installation, echo=TRUE, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("perturbMatch")
+
+## Or install the development version from GitHub
+# install.packages("devtools")
+devtools::install_github("soulj/perturbMatch", build_vignettes = TRUE)
+```
+
+Gene-identifier mapping depends on `AnnotationDbi` and `org.Hs.eg.db`, and the
+full reference databases are retrieved with `ExperimentHub`; all three are
+installed automatically alongside perturbMatch. To reproduce this vignette you
+will also need the `airway` example dataset and `DESeq2` for the worked
+example, and `GO.db` for the regulator GO enrichment:
+
+```{r vignette-deps, echo=TRUE, eval=FALSE}
+BiocManager::install(c("airway", "DESeq2", "GO.db"))
+```
+
+# Background
+
+## Overview
+
+perturbMatch matches a transcriptomics signature against a reference database
+of single-gene perturbation signatures, asking what transcriptional regulators
+could be driving the gene expression changes observed in an experiment.
+
+## Reference signatures
+
+perturbMatch provides a large collection of single-gene perturbation
+signatures derived from publicly available RNA-seq datasets. Each signature
+captures the transcriptional response to overexpression, knockdown, or
+knockout of a single gene.
+
+The signatures are computed from 4,453 public RNA-seq series in NCBI GEO,
+covering 3,571 knockdowns, 1,779 knockouts and 1,452 overexpressions over a
+common set of 39,376 NCBI genes. Series were selected on the basis of detected
+single gene perturbations and availability of pre-processed count data.
+The GEO series behind each signature is recorded in its `sig_id` 
+and `accession`, so any hit can be traced back to its source experiment.
+
+Assigning a perturbation type, a target gene and case/control sample groups to
+each series was automated with an LLM-assisted curation pipeline. The model
+used is recorded per signature in `colData(reference)$model`. Automated
+curation is not error-free, so [Verifying hits before interpretation] shows how
+to check a result before acting on it.
+
+The reference data are distributed as the `perturbMatchData` ExperimentHub
+package and archived at Zenodo under
+[doi:10.5281/zenodo.21792179](https://doi.org/10.5281/zenodo.21792179),
+released under a CC-BY-4.0 licence.
+
+## How it works
+
+perturbMatch compares your experimental gene expression signature against
+each reference signature using one of several implemented enrichment methods:
+`SignedJaccard`, `GSEA`, `cosine` or `cosineExtreme`. These are described
+in [Scoring methods available]. Regulators whose perturbation signatures
+closely match your query are ranked as likely upstream drivers.
+
+# Preparing input data
+
+We start from example RNA-seq data, which is analysed with DESeq2 to
+identify differentially expressed genes. The differential expression
+results can be passed directly to perturbMatch to be screened against a
+large collection of potential regulators.
+
+perturbMatch accepts input as a \pkg{DESeq2} `DESeqResults` object, a
+\pkg{limma} `topTable()` data frame, or any data frame with gene identifiers
+and a log2 fold-change column. `prepareQuery()` (below) converts any of
+these into the two-column form `calcEnrichment()` expects, and also
+maps the gene identifiers to Entrez IDs used by the reference
+databases.
+
+Correlation-based methods (see [Scoring methods available])
+require the full set of results from a differential expression analysis,
+i.e. all genes measured in the experiment, not just the statistically
+significant subset.
+
+The example below uses the `airway` dataset, which measures the gene
+expression response to dexamethasone treatment in airway smooth muscle
+cells. The `airway` dataset is loaded into the session with `data(airway)`
+after `library(airway)`. We perform differential expression analysis on this
+data with DESeq2 to create an example gene expression response for querying.
+
+```{r input-data}
+library(perturbMatch)
+library(SummarizedExperiment)
+library(BiocParallel)
+library(airway)
+library(DESeq2)
+
+# Load example data
+data(airway)
+
+# Calculate differential expression using DESeq2
+dds_airway <- DESeqDataSet(airway, design = ~ cell + dex) |>
+    DESeq() |>
+    results(contrast = c("dex", "trt", "untrt"))
+```
+
+We now have a `DESeqResults` object, `dds_airway`, containing the log2 fold
+changes and adjusted p-values for every gene measured in the experiment. This
+is the input we will pass to perturbMatch.
+
+```{r explore-dds}
+head(dds_airway)
+```
+
+
+## Load reference expression data
+
+Select and load the reference gene expression data to compare against your
+experiment with `getReferenceDatabase()`. The reference database is
+returned as a `SummarizedExperiment` object.
+
+For the purposes of this vignette we use a small bundled demonstration
+database of 21 signatures (`demo = TRUE`). The demonstration database
+should not be used for any real analysis: it is a small subset of the
+full reference database, chosen to illustrate both this bulk example and the
+single-cell workflow, and provided for illustration only.
+
+```{r load-data, message=TRUE}
+demo_expression_db <- getReferenceDatabase(demo = TRUE)
+```
+
+### Choosing a full reference database
+
+The full reference databases are retrieved with `getReferenceDatabase()`
+(`demo = FALSE` is the default) from ExperimentHub, where they are registered
+by the `perturbMatchData` package. They are between 0.7-3.1 GB, but only need
+to be downloaded once: ExperimentHub caches them, and `metadata()` on the
+returned object records which source they came from. Several builds of the
+reference are available through the `type` and `batchCorrection` arguments:
+
+* **`type = "chrdir"`** gives signatures summarised with the
+    characteristic-direction method. This is the default.
+* **`type = "limma"`** gives signatures derived from a `limma` differential
+    expression analysis useful for producing volcano plots of the signatures.
+
+Each type comes in two variants, selected with `batchCorrection`: the
+uncorrected signatures (`batchCorrection = FALSE`, the default) and signatures
+computed with study or batch effects removed (`batchCorrection = TRUE`).
+
+```{r reference-options, eval=FALSE}
+# Characteristic-direction reference, without batch-effect correction (default)
+ref_chrdir <- getReferenceDatabase(type = "chrdir")
+
+# Characteristic-direction reference, with batch-effect correction
+ref_chrdir_bc <- getReferenceDatabase(type = "chrdir", batchCorrection = TRUE)
+
+# limma reference, without batch-effect correction (default)
+ref_limma <- getReferenceDatabase(type = "limma")
+
+# limma reference, with batch-effect correction
+ref_limma_sva <- getReferenceDatabase(type = "limma", batchCorrection = TRUE)
+```
+
+`chrdir` references store a single characteristic-direction score, while `limma`
+references store both the log2 fold change (`log2fc`) and a combined *pi* score
+(`log2FC * -log10(padj)`, the default), which weights each gene's fold
+change by its statistical significance. `calcEnrichment()`'s `refMetric`
+argument selects which of a reference database's stored metrics to score
+against (for example `refMetric = "log2fc"` on a `limma` reference). The
+bundled demonstration database used throughout this vignette is a small
+`limma` subset, so its default metric is *pi*.
+
+Data are not loaded into R until required, keeping RAM usage low. The first
+few rows and columns of the assay can be inspected:
+
+```{r explore-db}
+assay(demo_expression_db)[1:3, 1:3]
+```
+
+Metadata for each perturbation experiment are stored in the `colData` slot:
+
+```{r explore-coldata}
+coldata_cols <- c(
+    "sig_id", "pert_symbol", "pert_type", "cell_line", "cell_line_efo_label"
+)
+head(colData(demo_expression_db)[, coldata_cols], 3)
+```
+
+Any `SummarizedExperiment` object containing a measure of differential
+expression can be used as a reference database for perturbMatch, provided
+`colData` includes at least the `pert_symbol`, `sig_id`, and `pert_type`
+columns identifying each experiment. The remaining columns in Table 1 are
+annotation that the packaged references also provide: provenance of the
+source experiment (`accession`, `control_samples`, `case_samples`,
+`technology`), how the signature was curated (`model`), the biological
+context it was generated in (`cell_line`, `cell_line_efo_id`,
+`cell_line_efo_label`), and per-signature quality information
+(`entrez_gene_id`, `target_gene_percentile`).
+
+```{r table-coldata, echo=FALSE}
+descriptions <- c(
+    sig_id = paste(
+        "Unique identifier for the perturbation signature.",
+        "Matches the signature matrix column names"
+    ),
+    pert_symbol = "Official gene symbol of the perturbed gene target",
+    pert_id = "Internal ID combining the symbol and perturbation type",
+    pert_type = paste(
+        "Type of perturbation: `KD` (knockdown), `KO` (knockout)",
+        "or `OE` (overexpression)"
+    ),
+    accession = "NCBI GEO series accession for the source study",
+    control_samples = paste(
+        "Comma-separated list of raw sample IDs used as the control"
+    ),
+    case_samples = "Comma-separated list of raw sample IDs used as the case",
+    technology = paste(
+        "Profiling platform used to generate the source data,",
+        "e.g. `RNA-seq`"
+    ),
+    cell_line = paste(
+        "Cell line or primary cell type the perturbation was performed in,",
+        "as free text reported by the source study, e.g. `T47D`,",
+        "`iPSC-derived Macrophages`"
+    ),
+    model = paste(
+        "Curation approach used to annotate the signature: `curated` by",
+        "hand, or the LLM that extracted the annotation"
+    ),
+    entrez_gene_id = paste(
+        "NCBI Entrez ID of the perturbed gene. `NA` when the target has no",
+        "human Entrez entry, e.g. a viral gene. Use it to filter out hits",
+        "that cannot be human upstream regulators"
+    ),
+    cell_line_efo_id = paste(
+        "Experimental Factor Ontology (EFO) identifier matched to",
+        "`cell_line`, e.g. `EFO:0003043`. `NA` where no confident match",
+        "was found, so not every signature is annotated"
+    ),
+    cell_line_efo_label = paste(
+        "EFO label for `cell_line_efo_id`, giving a standardised name for",
+        "the free-text `cell_line` value (`NCI-H1299` for `H1299`).",
+        "Use it to group or select signatures by cell context"
+    ),
+    target_gene_percentile = paste(
+        "Percentile position of the perturbed gene within its own",
+        "signature, from most down-regulated (0) to most up-regulated",
+        "(100). It is a quality check on whether the perturbation worked"
+    )
+)
+
+# Ordered by the colData columns themselves, so the table cannot drift from
+# the object it documents.
+schema_cols <- colnames(colData(demo_expression_db))
+stopifnot(setequal(schema_cols, names(descriptions)))
+
+schema_df <- data.frame(
+    `Column Name` = schema_cols,
+    `Description` = unname(descriptions[schema_cols]),
+    check.names = FALSE
+)
+
+knitr::kable(
+    schema_df,
+    row.names = FALSE,
+    caption = "Table 1: Reference database colData columns"
+)
+```
+
+## Map the query to the reference
+
+The `airway` DESeq2 result uses Ensembl gene IDs, but the
+reference database uses Entrez IDs. `prepareQuery()` maps between the two,
+reporting how much of the query mapped. Passing `reference` additionally
+reports how much of the mapped query is actually present in the reference,
+a check that the gene IDs line up before scoring.
+
+By default `prepareQuery()` also drops genes with a missing adjusted
+p-value. `DESeq2` leaves `padj` as `NA` for genes it filters out before
+testing (typically because they are too lowly expressed to be informative),
+and these carry no reliable signal for signature matching. Set
+`dropLowExpressed = FALSE` to keep them.
+
+```{r prepare-query, message=TRUE}
+final_res <- prepareQuery(dds_airway, reference = demo_expression_db)
+head(final_res)
+```
+
+## Starting from a table or CSV file
+
+`prepareQuery()` also accepts any `data.frame`, so you can read a file
+with `read.csv()` (or `read.delim()` for tab-separated files) to be used
+as input.
+
+The table needs:
+
+* a gene identifier for each row, either in the row names or in a
+    column. Ensembl, Entrez or gene symbols are all fine.
+    `prepareQuery()` infers the type and maps to Entrez.
+* a log2 fold-change column named `log2FoldChange`, `logFC`, or
+    `log2FC`.
+* *(optional)* an adjusted p-value column named `padj` or `adj.P.Val`,
+    which enables the low-expression filtering described above.
+
+Columns are matched by name, so the fold-change and p-value columns can sit
+anywhere in the table.
+
+Anything `prepareQuery()` does not recognise such as raw p-values, base
+means, average expression is ignored, and the returned query always has the
+same `gene`/`log2FC`/`padj` columns.
+
+To keep this example self-contained we first write the airway result out to
+a temporary CSV file, deliberately putting the columns in an awkward order:
+
+```{r csv-write}
+de_table <- as.data.frame(dds_airway)
+de_table <- data.frame(
+    baseMean = de_table$baseMean,       # extra column, ignored
+    padj     = de_table$padj,           # optional adjusted p-value
+    gene_id  = rownames(de_table),      # gene ID, not in the first column
+    pvalue   = de_table$pvalue,         # extra column, ignored
+    log2FC   = de_table$log2FoldChange  # fold-change column
+)
+
+csv_path <- tempfile(fileext = ".csv")
+write.csv(de_table, csv_path, row.names = FALSE)
+```
+
+Reading it back in and preparing it then gives the same query as before:
+
+```{r csv-read, message=TRUE}
+my_de <- read.csv(csv_path)
+head(my_de)
+
+query_from_csv <- prepareQuery(my_de, reference = demo_expression_db)
+head(query_from_csv)
+```
+
+# Calculating regulator scores
+
+With the query mapped to the reference, we can score every reference
+signature against it. Here we score the full ranked expression matrix using
+the `cosine` method, which is appropriate for continuous fold-change data
+(see [Scoring methods available] for alternatives suited to gene-set input).
+
+```{r scoring}
+regulatorResults <- calcEnrichment(
+    demo_expression_db,
+    expressionMatrix = final_res,
+    method = "cosine"
+)
+```
+
+Results are stored in a `SummarizedExperiment`-like `PerturbMatch` object,
+with enrichment scores in the `enrichment` assay and perturbation experiment
+details in `rowData`. Printing it gives a quick summary of both:
+
+```{r explore-perturbMatch-show}
+regulatorResults
+```
+
+Perturbation details for each reference signature carry through into
+`rowData` (showing a few key columns here):
+
+```{r explore-perturbMatch-rowdata}
+head(rowData(regulatorResults)[, c("pert_symbol", "pert_type", "cell_line")])
+```
+
+The up-/down-regulated and background gene sets actually used for scoring
+are recorded on the result and can be retrieved with the corresponding
+accessors.
+
+```{r explore-perturbMatch-genesets}
+upRegulated(regulatorResults) |> head()
+downRegulated(regulatorResults) |> head()
+background(regulatorResults) |> head()
+```
+
+View the top hits ranked by absolute score with `topRegulators()`:
+
+```{r results}
+cosine_cols <- c("pert_symbol", "pert_type", "score", "zscore")
+topRegulators(regulatorResults, n = 5)[, cosine_cols]
+```
+
+## Checking a known target
+
+The airway data measure the response to dexamethasone, a glucocorticoid
+that acts directly through the glucocorticoid receptor, *NR3C1*. *NR3C1* is
+therefore the expected upstream regulator, and the small demo database was
+selected to include a *NR3C1* knockdown signature. We rank the reference
+signatures by absolute score and look up where *NR3C1* is ranked:
+
+```{r known-target}
+ranked <- topRegulators(regulatorResults, n = nrow(regulatorResults))
+nr3c1_rank <- match("NR3C1", ranked$pert_symbol)
+nr3c1_rank
+
+ranked[nr3c1_rank, cosine_cols]
+```
+
+The *NR3C1* knockdown ranks near the top (rank `r nr3c1_rank` of
+`r nrow(regulatorResults)`). Its raw score is *negative*: dexamethasone
+*activates* NR3C1 while the reference signature *knocks it down*, so the two
+run in opposite directions. The [Visualise the results] section below turns
+this into an activity-level statement with `inferActivity = TRUE`.
+
+> **A note on `zscore` and reference set size.** `zscore` standardises each
+> method's raw score across the reference signatures actually scored in
+> that call, so its scale depends on the size and diversity of that
+> background set. This demo database has only `r nrow(regulatorResults)`
+> signatures, nowhere near enough for these particular z-scores to be
+> reliable. With the full reference database (thousands of signatures) the
+> same scores become much more informative.
+
+## Using an explicit gene set
+
+Instead of a ranked matrix, `calcEnrichment()` also accepts an explicit
+query as `upRegulated`/`downRegulated`/`background` character vectors of
+gene IDs. Use this format when you only have a fixed set of significant
+genes rather than a full ranked differential expression result. If you
+do have an `expressionMatrix`, `SignedJaccard` and `GSEA` will derive an
+up/down gene set from it for you (as `cosine`/`cosineExtreme` always
+require), so there is no need to manually build the sets in this case. Here
+we derive a significant gene set from the same DESeq2 result used above
+(adjusted p-value < 0.05), and score it with `SignedJaccard`:
+
+```{r geneset-input}
+sig_genes <- final_res[!is.na(final_res$padj) & final_res$padj < 0.05, ]
+
+up_genes <- sig_genes$gene[sig_genes$log2FC > 0]
+down_genes <- sig_genes$gene[sig_genes$log2FC < 0]
+background_genes <- final_res$gene
+
+results_signedjaccard <- calcEnrichment(
+    demo_expression_db,
+    upRegulated = up_genes,
+    downRegulated = down_genes,
+    background = background_genes,
+    method = "SignedJaccard"
+)
+
+result_cols <- c("pert_symbol", "pert_type", "score", "overlap", "zscore")
+topRegulators(results_signedjaccard, n = 5)[, result_cols]
+```
+
+# Visualise the results
+
+`plotSimilarity()` displays the top positive (mimicking) and negative
+(reversing) signatures as a lollipop plot:
+
+```{r plot-similarity, fig.width=7}
+plotSimilarity(regulatorResults, topN = 20)
+```
+
+The fill colour shows the sign of the similarity score, orange for
+signatures that *mimic* the query (positive score) and blue for those that
+*reverse* it (negative score). The point shape shows the direction of
+the underlying perturbation: up-pointing triangles for gain-of-function
+overexpression (`OE`) and down-pointing triangles for loss-of-function
+knockdown/knockout (`KD`/`KO`). Keeping these separate lets you read the
+perturbation type together with the sign of the score. A *reversing* (blue)
+*knockdown* (down-triangle) signature, for instance, implies the query
+behaves as though that gene's activity were *increased*.
+
+Set `inferActivity = TRUE` to flip the sign of scores for knockdown/
+knockout perturbations, so the plot reflects inferred gene *activity*
+rather than raw transcriptional similarity. A knockdown/knockout signature
+that is *anti*-correlated with the query (a negative raw score) implies
+the query behaves as though that gene's activity had *increased*, the
+opposite of what a negative score would mean for an overexpression
+signature.
+
+For example, `AFF4_KD` has a raw cosine z-score of about
+`r round(regulatorTable(regulatorResults)["GSE197354_AFF4_KD_1", "zscore"], 2)`,
+placing it on the "Reverse (Negative)" side of the plot above: the knockdown
+signature runs opposite to the dexamethasone response. Because it is a
+knockdown, `inferActivity = TRUE` flips its sign to about
+`r round(-regulatorTable(regulatorResults)["GSE197354_AFF4_KD_1", "zscore"], 2)`
+below, moving it to the "Mimic (Positive)" side: the data are consistent
+with dexamethasone *increasing* AFF4 activity, since suppressing AFF4
+produces roughly the opposite expression pattern to the treatment.
+
+```{r plot-similarity-activity, fig.width=7}
+plotSimilarity(regulatorResults, topN = 20, inferActivity = TRUE)
+```
+
+## Inspecting a single reference signature
+
+Before trusting a top hit it is worth looking at the reference signature
+itself: did the perturbed gene actually move in the source data, and does
+the overall signature look like a real, well-behaved differential
+expression result? `plotVolcano()` draws a volcano plot (log2 fold change
+against `-log10` FDR) for any single column of a reference database that
+stores per-gene fold changes and p-values (i.e. the `limma` references and
+the demo database used here).
+
+Continuing the dexamethasone example, we plot the *NR3C1* knockdown
+signature and highlight the perturbed gene itself with `selectedPoints`.
+The reference is indexed by Entrez ID, so we relabel the rows with gene
+symbols first to make the plot readable.
+
+```{r plot-volcano, fig.width=7}
+nr3c1_signature <- demo_expression_db
+rownames(nr3c1_signature) <- rowData(nr3c1_signature)$Symbol
+
+plotVolcano(
+    nr3c1_signature,
+    signature         = "GSE200312_NR3C1_KD_1",
+    effectAssay       = "log2fc",
+    pvalueAssay       = "padj",
+    selectedPoints    = "NR3C1",
+    truncateInfPvalue = FALSE
+)
+```
+
+*NR3C1* itself sits well down the left-hand (down-regulated) side of its own
+knockdown signature, confirming the intended perturbation took effect.
+
+## Where the perturbed gene ranks: `target_gene_percentile`
+
+The volcano plot gives the differential expression of the perturbed gene one
+signature at a time. `colData()` records the same information for every
+reference signature in a single column, `target_gene_percentile`: the
+percentile position of the perturbed gene within its own signature, ranked
+from most down-regulated (0) to most up-regulated (100).
+
+The direction of the perturbation sets the expectation. A knockout or
+knockdown (`KO`/`KD`) suppresses its target, so the perturbed gene should
+sit near the bottom of its signature and score a *low* percentile. An
+overexpression (`OE`) drives its target up, so it should sit near the top
+and score a *high* percentile. A value that contradicts the perturbation
+type is a potential warning sign that the signature is mislabelled or that the
+perturbation did not take effect.
+
+```{r target-percentile}
+pct_cols <- c("pert_symbol", "pert_type", "target_gene_percentile")
+pct <- as.data.frame(colData(demo_expression_db)[, pct_cols])
+pct <- pct[order(pct$target_gene_percentile), ]
+pct
+```
+
+The *NR3C1* knockdown from the volcano plot above illustrates the low end:
+
+```{r target-percentile-worked}
+nr3c1_pct <- pct[pct$pert_symbol == "NR3C1", ]
+nr3c1_pct
+```
+
+*NR3C1* sits in the bottom 1% of its own knockdown signature
+(`target_gene_percentile` of about
+`r round(nr3c1_pct$target_gene_percentile, 1)`), near the bottom as a `KD`
+should be, and matching where it appeared on the left of the volcano plot.
+At the other extreme, the overexpression signatures (`OE`) place their
+targets close to the 100th percentile.
+
+Note the *CCDC88A* is annotated as a knockout, so its target should sit near
+the bottom, yet it lands around the
+`r round(pct$target_gene_percentile[pct$pert_symbol == "CCDC88A"])`th
+percentile, the middle of its own signature:
+
+```{r target-percentile-suspect}
+pct[pct$pert_symbol == "CCDC88A", ]
+```
+
+Signatures such as this should be treated with caution as the perturbation may
+have been weak or incomplete, or the signature may be mislabelled. This is
+why [Verifying hits before interpretation] is important before any candidate
+is followed up.
+
+### Filtering on the target percentile
+
+`target_gene_percentile` is an ordinary `colData` column, so signatures can
+be dropped with standard `SummarizedExperiment` subsetting before scoring.
+Here we require knockdowns to place their target in the bottom quarter of
+their own signature, leaving the other perturbation types untouched:
+
+```{r target-percentile-filter}
+target_pct <- colData(demo_expression_db)$target_gene_percentile
+pert_types <- colData(demo_expression_db)$pert_type
+
+drop <- pert_types == "KD" & !is.na(target_pct) & target_pct > 25
+filtered_db <- demo_expression_db[, !drop]
+
+c(all = ncol(demo_expression_db), filtered = ncol(filtered_db))
+```
+
+`filtered_db` is a reference database and can be passed
+straight to `calcEnrichment()`.
+
+Note that a CRISPR knockout
+(`KO`) won't necessarily reduce the target gene expression 
+(only the target protein), so non-low percentile is not by
+itself evidence that the perturbation failed.
+
+# Functional enrichment of the regulator hits
+
+Individual top hits are easier to interpret as a group when you ask what
+biological processes the mimicking and reversing regulators have in common.
+`regulatorGSEA()` does this by ranking the reference regulators by their
+similarity score and performing gene set enrichment (via `fgsea`) over Gene
+Ontology terms.
+
+A regulator gene usually appears as several signatures (different cell
+lines, knockdown versus overexpression). `regulatorGSEA()` collapses these
+to one value per gene by flipping the sign of knockdown/knockout scores
+so everything is on a common inferred-activity scale (as in
+`plotSimilarity(inferActivity = TRUE)`), then aggregating each gene's
+signatures (`aggregate = "extreme"` by default, keeping the single strongest
+signature, or `"mean"` to average them).
+
+Gene sets are built from `org.Hs.eg.db` and readable GO term names are added
+from `GO.db` when it is installed.
+
+```{r regulator-gsea}
+go <- regulatorGSEA(results_signedjaccard, ontology = "BP", minSize = 1)
+head(go[, c("term", "NES", "padj", "size", "leadingEdge")])
+```
+
+`plotRegulatorGSEA()` draws a dot plot from that table, placing each term by
+its `NES`:
+
+```{r regulator-gsea-plot, fig.width=7, fig.height=5}
+plotRegulatorGSEA(go, n = 10, pvalueCutoff = 1)
+```
+
+On this 21-signature demo database the enrichment is underpowered and none of
+the terms are individually significant, so `pvalueCutoff = 1` is used purely
+to render an illustrative plot and `minSize` is dropped to 1. On a full
+reference (thousands of regulators) keep the defaults (`minSize = 15`,
+`pvalueCutoff = 0.1`), where the enrichment becomes meaningful and the terms
+summarise the biology shared by the top regulators.
+
+# Scoring methods available
+
+```{r table-methods, echo=FALSE}
+methods_data <- data.frame(
+    Method = c("cosine", "cosineExtreme", "GSEA", "SignedJaccard"),
+    `Input Type` = c(
+        "Continuous", "Rank/set-based", "Continuous/ranked", "Set-based"
+    ),
+    Description = c(
+        paste(
+            "Classic cosine similarity between the full continuous log2FC",
+            "vectors of the query and reference."
+        ),
+        paste(
+            "Cosine similarity restricted to the top N most extreme genes",
+            "of the reference and matching query features."
+        ),
+        paste(
+            "Gene Set Enrichment Analysis. It evaluates whether the query",
+            "gene set or ranked list is enriched at the top or bottom of the",
+            "reference signature distribution."
+        ),
+        paste(
+            "Intersection-over-union (Jaccard index) for gene sets, taking",
+            "into account the direction (sign) of the log2FC regulation."
+        )
+    ),
+    check.names = FALSE
+)
+
+knitr::kable(
+    methods_data,
+    row.names = FALSE,
+    caption = "Table 2: Overview of reference expression scoring methods"
+)
+```
+
+# Comparing scoring methods
+
+The methods above rank the same reference signatures on different notions
+of similarity, so they broadly agree but need not identify identical top
+hits. Having already scored the airway/dexamethasone query with `cosine`
+and `SignedJaccard` above, we complete the comparison by also running
+`GSEA` (which, like `SignedJaccard`, takes an explicit gene set) and
+`cosineExtreme` (which, like `cosine`, takes the ranked matrix):
+
+```{r compare-methods-run}
+results_gsea <- calcEnrichment(
+    demo_expression_db,
+    upRegulated = up_genes,
+    downRegulated = down_genes,
+    background = background_genes,
+    method = "GSEA"
+)
+
+results_cosineextreme <- calcEnrichment(
+    demo_expression_db,
+    expressionMatrix = final_res,
+    method = "cosineExtreme"
+)
+```
+
+Aligning the four result sets by signature and correlating their z-scores
+shows how much they overlap. Methods within the same family, the continuous
+`cosine`/`cosineExtreme` pair and the set-based `SignedJaccard`/`GSEA` pair,
+tend to track each other closely, while agreement *across* the two families
+is typically weaker, because they measure genuinely different things:
+
+```{r compare-methods-cor}
+sig_ids <- rownames(regulatorResults)
+
+score_compare <- data.frame(
+    cosine        = regulatorTable(regulatorResults)$zscore,
+    cosineExtreme = regulatorTable(results_cosineextreme)[sig_ids, "zscore"],
+    SignedJaccard = regulatorTable(results_signedjaccard)[sig_ids, "zscore"],
+    GSEA          = regulatorTable(results_gsea)[sig_ids, "zscore"]
+)
+
+round(cor(score_compare), 2)
+```
+
+On this small demo database the correlations are good, but on a full-size
+reference (thousands of signatures) `cosine` and `SignedJaccard` can produce
+disconcordant rankings. `cosine` asks whether the whole fold-change profile
+of the query is aligned with the reference, so every gene contributes in
+proportion to its magnitude. `SignedJaccard`/`GSEA` first reduce each
+signature to a discrete up/down gene set and then ask how much those sets
+overlap in the same direction, so they are driven by which genes cross the
+threshold rather than by how large their changes are. A regulator can
+therefore rank highly under one family and modestly under the other
+depending on whether its signal lives in a broad continuous shift or a
+concentrated set of strongly moved genes.
+
+In practice, `cosine`/`cosineExtreme` are a reasonable default when a full
+ranked signature is available, while `SignedJaccard`/`GSEA` are useful when
+only a discrete up/down gene set can be defined, or when a set-based
+interpretation (shared genes, rather than correlated magnitudes) is
+preferred.
+
+## Interpreting the score, zscore, and overlap columns
+
+Every `perturbMatch` result carries at least two columns beyond the method's
+own score: `zscore` , the number of standard deviations a signature's score
+sits from the mean across the reference queried (used for ranking with
+`topRegulators()` and for `plotSimilarity()`) and, for `SignedJaccard`,
+`overlap`, the number of query genes that overlapped the reference gene set
+at all (in either direction). A large `|zscore|` backed by a small `overlap`
+is weaker evidence than the same `|zscore|` backed by a large one, since it
+is based on fewer shared genes:
+
+```{r overlap-filter}
+reliable_hits <- regulatorTable(results_signedjaccard)
+reliable_hits <- reliable_hits[reliable_hits$overlap >= 50, ]
+reliable_hits <- reliable_hits[order(-abs(reliable_hits$zscore)), ]
+
+head(reliable_hits[, result_cols])
+```
+
+# Tuning topN
+
+`SignedJaccard` and `GSEA` need reference gene sets, not just ranked
+values, so each reference signature's continuous scores are first
+discretised into up-/down-regulated sets. By default this is done with
+`topN`: the `topN` highest- and lowest-ranked reference genes become that
+signature's up-/down-regulated sets.
+
+
+```{r tune-topn}
+sj_small <- calcEnrichment(
+    demo_expression_db, upRegulated = up_genes, downRegulated = down_genes,
+    background = background_genes, method = "SignedJaccard", topN = 100
+)
+sj_large <- calcEnrichment(
+    demo_expression_db, upRegulated = up_genes, downRegulated = down_genes,
+    background = background_genes, method = "SignedJaccard", topN = 1000
+)
+```
+
+*NR3C1* is the expected regulator of the dexamethasone target, so we find
+its rank under each setting to see the effect these settings have:
+
+```{r tune-topn-rank}
+nr3c1_rank_at <- function(res) {
+    ranked <- topRegulators(res, n = nrow(res))
+    match("NR3C1", ranked$pert_symbol)
+}
+
+c(
+    topN_100  = nr3c1_rank_at(sj_small),
+    topN_1000 = nr3c1_rank_at(sj_large)
+)
+```
+
+The *NR3C1* knockdown ranks `r nr3c1_rank_at(sj_small)` out of
+`r nrow(sj_small)` with `topN = 100` but slips to
+`r nr3c1_rank_at(sj_large)` with `topN = 1000`: widening the reference gene
+sets dilutes the overlap that placed it near the top. Comparing a few `topN`
+settings this way is a reasonable check that a finding is not strongly
+dependent on the cutoff chosen.
+
+
+# Parallelisation
+
+Scoring the full reference database (thousands of signatures) is dominated
+by reading and decompressing parts of the reference database, and this work
+parallelises well. `calcEnrichment()` accepts a `BiocParallel` back-end via its
+`BPPARAM` argument. Supplying a multi-core parameter shares the reference
+signatures across workers. On a typical multi-core machine this runs roughly
+3 to 4 times faster than the default.
+
+```{r parallel, eval=FALSE}
+library(BiocParallel)
+
+regulatorResults <- calcEnrichment(
+    ref_limma,
+    expressionMatrix = final_res,
+    method  = "cosine"
+)
+```
+
+Work is split into column wise chunks whose size is controlled by `chunkSize`.
+By default (`chunkSize = NULL`) `calcEnrichment()` picks a chunk size
+automatically from the number of reference signatures and the number of
+workers in `BPPARAM`. Because each worker holds its own block of the
+reference in memory, more workers means higher peak RAM usage.
+
+# Verifying hits before interpretation
+
+The reference database is assembled from public datasets whose metadata
+(which samples are cases versus controls, and which gene was perturbed) is
+**majority LLM-annotated**. This automated curation makes the collection
+broad and has been benchmarked against hand curated data, but it is not
+error-free: mislabelled case/control groups or incorrect perturbation targets
+are likely to occur.
+
+**Before interpreting or following up a top hit, manually verify it.** For
+each candidate regulator, check the original data source (the `accession`,
+`control_samples`, and `case_samples` columns in `rowData()`) to confirm
+that the case/control assignment is correct and that the annotated perturbed
+gene is the one actually manipulated.
+
+**Cell context matters.** Each reference signature reflects the perturbation
+of a gene in a particular cell line or cell type (the `cell_line` column of
+`rowData()`), and a regulator's downstream program can differ substantially
+between contexts. A genuine driver may therefore score only modestly if its
+available reference signatures come from cell types unrelated to your
+experiment, while signatures generated in a matching context tend to rank
+more strongly. Consider how closely its `cell_line` resembles your own
+system, and potentially give more weight to regulators supported by several
+signatures across relevant contexts than to those resting on a single
+signature from an unrelated cell type. Because `cell_line` is free text
+taken from the source study, the same cell line can appear under several
+spellings. Where an ontology match was available, the `cell_line_efo_id` and
+`cell_line_efo_label` columns give a standardised Experimental Factor
+Ontology name for it, which is the more reliable field to group or filter
+signatures on.
+
+# Saving results to a file
+
+Any of the tables above is an ordinary `data.frame`, so it can be written
+out with `write.table()` for use in Excel or a downstream script. To save the
+ranked regulators as a tab-separated (TSV) file:
+
+```{r save-tsv, eval=FALSE}
+write.table(
+    topRegulators(regulatorResults, n = nrow(regulatorResults)),
+    file = "perturbmatch_regulators.tsv",
+    sep = "\t", quote = FALSE, row.names = FALSE
+)
+```
+
+# Related packages
+
+perturbMatch screens a query against a curated collection of single-gene
+genetic perturbation RNA-seq signatures to nominate upstream regulators.
+Several other Bioconductor packages address related questions (Table 3). In
+particular, connectivity against drug/compound signatures (from the L1000
+platform) is covered by `signatureSearch` rather than perturbMatch.
+
+```{r table-related, echo=FALSE}
+related <- data.frame(
+    Package = c(
+        "signatureSearch", "decoupleR / dorothea", "viper / RTN", "gCMAP"
+    ),
+    Focus = c(
+        "Drug/compound connectivity (LINCS L1000, CMap) for drug repurposing",
+        "Transcription-factor activity from curated regulatory networks",
+        "Master-regulator analysis over inferred regulatory networks",
+        "General framework for building and querying connectivity maps"
+    ),
+    `Contrast with perturbMatch` = c(
+        "perturbMatch queries genetic perturbations, not chemical ones",
+        "Knowledge/regulon-based, whereas perturbMatch is data-driven",
+        "Network-inferred regulators, not measured perturbation signatures",
+        paste(
+            "perturbMatch includes a curated perturbation reference",
+            "and scoring methods"
+        )
+    ),
+    check.names = FALSE
+)
+
+knitr::kable(
+    related,
+    row.names = FALSE,
+    caption = "Table 3: Related Bioconductor packages"
+)
+```
+
+# Session information
+
+This vignette was compiled using:
+
+```{r session-info, echo=TRUE, message=FALSE}
+sessionInfo()
+```
+
+# Acknowledgements
+
+This package was developed at the University of Liverpool.

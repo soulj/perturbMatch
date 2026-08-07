@@ -1,0 +1,73 @@
+Package: perturbMatch
+Type: Package
+Title: Match Transcriptomics Signatures to Single-Gene Perturbation References
+Version: 0.99.0
+Authors@R: c(
+    person("Jamie", "Soul", role = c("aut", "cre"), email = "jamie.soul@liverpool.ac.uk", 
+           comment = c(ORCID = "0000-0003-2255-6459")),
+    person("Versus Arthritis", role = "fnd")
+  )
+Description: Matches a query transcriptomics signature against a reference
+    database of single-gene perturbation signatures, ranking the perturbations
+    whose expression response most resembles the query and so nominating the
+    regulators most likely to drive the observed change. Query signatures
+    derived from a differential expression result are scored using cosine,
+    GSEA and signed-Jaccard similarity metrics. Reference databases are
+    supplied as HDF5-backed SummarizedExperiment objects for memory-efficient
+    handling of large perturbation collections, and helper functions rank and
+    visualise the best-matching regulators.
+Depends: R (>= 4.5.0)
+Imports:
+    methods,
+    AnnotationDbi,
+    org.Hs.eg.db,
+    SummarizedExperiment,
+    BiocFileCache,
+    BiocParallel,
+    ExperimentHub,
+    dplyr,
+    ggplot2,
+    HDF5Array,
+    fgsea,
+    DelayedMatrixStats,
+    DelayedArray,
+    MatrixGenerics,
+    S4Vectors,
+    cowplot,
+    ggrepel,
+    rlang
+License: GPL-3
+URL: https://github.com/soulj/perturbMatch
+BugReports: https://github.com/soulj/perturbMatch/issues
+biocViews: GeneRegulation, Transcriptomics, Transcription, GeneSetEnrichment, GeneTarget, GeneExpression, DifferentialExpression
+LazyData: FALSE
+VignetteBuilder: knitr
+RoxygenNote: 7.3.2
+Encoding: UTF-8
+Suggests:
+    testthat,
+    rmarkdown,
+    BiocStyle,
+    knitr,
+    GO.db,
+    airway,
+    DESeq2,
+    muscData,
+    scuttle,
+    SingleCellExperiment,
+    singscore,
+    scater,
+    scales,
+    tibble
+Collate:
+    'perturbMatch-package.R'
+    'perturbMatch_class.R'
+    'perturbMatch_get_reference_database.R'
+    'perturbMatch_prepareQuery.R'
+    'perturbMatch_calcEnrichment.R'
+    'method_cosine.R'
+    'method_gsea.R'
+    'method_jaccard.R'
+    'perturbMatch_plot_similarity.R'
+    'perturbMatch_regulator_go.R'
+    'perturbMatch_volcanoPlot.R'

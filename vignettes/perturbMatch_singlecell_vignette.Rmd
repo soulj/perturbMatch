@@ -1,0 +1,341 @@
+---
+title: >
+  Matching a single-cell RNA-seq response to perturbation references using
+  perturbMatch
+author:
+- name: Jamie Soul
+  affiliation:
+  - Biochemistry, Cell and Systems Biology, Institute of Systems, Molecular
+    & Integrative Biology, Faculty of Health and Life Sciences
+  email: jamie.soul@liverpool.ac.uk
+date: "`r Sys.Date()`"
+package: perturbMatch
+output:
+  BiocStyle::html_document:
+    titlecaps: false
+    toc: true
+    toc_float: true
+    number_sections: true
+abstract: >
+  perturbMatch scores a differential expression signature against a reference
+  collection of single-gene perturbations, whatever the source of the
+  signature. This vignette applies perturbMatch to a single-cell RNA-seq
+  experiment: interferon-stimulated versus control CD14+ monocytes from the
+  Kang et al. PBMC dataset. It covers aggregating cells into pseudobulk
+  samples, scoring the resulting signature, recognising and filtering hits
+  that cannot be genuine human regulators, and using singscore to project a
+  candidate regulator's activity back onto individual cells.
+vignette: >
+  %\VignetteIndexEntry{perturbMatch single-cell}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+---
+
+```{r style, echo=FALSE, results='hide', message=FALSE}
+library(BiocStyle)
+library(knitr)
+opts_chunk$set(error = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r setup, message=FALSE, warning=FALSE}
+library(perturbMatch)
+library(muscData)
+library(SingleCellExperiment)
+library(scuttle)
+library(DESeq2)
+library(SummarizedExperiment)
+library(singscore)
+library(scater)
+library(ggplot2)
+```
+
+# Overview
+
+perturbMatch analyses a differential expression signature regardless of
+whether it came from bulk or single-cell RNA-seq. For single-cell data the
+recommended route is to aggregate counts into pseudobulk samples and run a
+standard differential expression analysis. This vignette follows that route on the Kang et al. PBMC dataset
+from `muscData`, comparing control and interferon-beta-stimulated CD14+
+monocytes.
+
+The bulk RNA-seq vignette (`vignette("perturbMatch")`) introduces the
+reference database, scoring methods, and plotting functions in more detail.
+Here we focus on the single-cell workflow and two points specific to it:
+filtering hits that cannot be human regulators, and validating a candidate
+regulator at the level of individual cells.
+
+# Load the data
+
+The `muscData` package distributes the Kang et al. PBMC study as a
+`SingleCellExperiment`. Eight lupus patients each contributed peripheral
+blood mononuclear cells that were split into two aliquots, one left untreated
+and one stimulated with recombinant interferon beta for six hours, then
+profiled by droplet single-cell RNA-seq. The design therefore pairs a control
+and a stimulated sample within every donor, which lets us treat donor as a
+blocking factor later on. The object carries raw UMI counts in the `counts`
+assay, and per-cell annotation in `colData` including the donor of origin
+(`ind`), the stimulation condition (`stim`), a coarse cell type label
+(`cell`), and a doublet call (`multiplets`).
+
+We copy the donor identifier into a tidier `donor` column and take a first
+look at how many cells fall in each cell type and in each donor by condition
+combination. The counts confirm the paired control and stimulated design
+across the eight donors.
+
+```{r load}
+sce <- Kang18_8vs8()
+sce$donor <- paste0("Donor", sce$ind)
+
+table(sce$cell)
+table(sce$donor, sce$stim)
+```
+
+# Select a cell population
+
+We restrict the analysis to a single, well-defined population, the CD14+
+monocytes, keeping only confidently assigned singlets.
+
+```{r filter-cells}
+sce <- sce[, sce$multiplets == "singlet"]
+sce <- sce[, !is.na(sce$cell)]
+sce <- sce[, sce$cell == "CD14+ Monocytes"]
+
+sce
+```
+
+# Aggregate into pseudobulk samples
+
+`aggregateAcrossCells()` sums counts within each donor and stimulation
+condition, giving one pseudobulk profile per biological replicate.
+
+```{r pseudobulk}
+pb <- aggregateAcrossCells(
+    sce,
+    ids = DataFrame(donor = sce$donor, stim = sce$stim)
+)
+
+colData(pb)[, c("donor", "stim", "ncells")]
+```
+
+# Differential expression
+
+We test for genes responding to interferon stimulation with DESeq2,
+controlling for donor.
+
+```{r de}
+dds <- DESeqDataSet(pb, design = ~ donor + stim)
+dds <- DESeq(dds)
+
+res <- results(dds, contrast = c("stim", "stim", "ctrl"))
+
+res |> as.data.frame() |>
+    dplyr::filter(!is.na(padj)) |>
+    dplyr::arrange(padj) |>
+    head(5)
+```
+
+# Score candidate regulators
+
+Load the demonstration reference database and map the query onto it. As in
+the bulk workflow, `prepareQuery()` maps gene identifiers to Entrez and drops
+genes with a missing adjusted p-value, which DESeq2 assigns to genes it
+filtered out before testing.
+
+```{r prepare-query, message=TRUE}
+demo_expression_db <- getReferenceDatabase(demo = TRUE)
+
+query <- prepareQuery(res, reference = demo_expression_db)
+head(query)
+```
+
+The stimulated CD14+ monocytes carry a continuous fold-change signature, so
+we score it with `cosine`.
+
+```{r score}
+regulatorResults <- calcEnrichment(
+    demo_expression_db,
+    expressionMatrix = query,
+    method = "cosine"
+)
+
+hit_cols <- c("pert_symbol", "pert_type", "entrez_gene_id", "score", "zscore")
+topRegulators(regulatorResults, n = 10)[, hit_cols]
+```
+
+# Filtering hits that cannot be human regulators
+
+The reference collection is assembled from many public perturbation studies,
+and the sample annotation was largely produced by an LLM-assisted pipeline.
+That pipeline has erroneously admitted some studies that overexpress viral
+proteins in human cells to study host-pathogen interactions, and labelled the
+viral protein as the perturbed target. These signatures make biological sense
+as top hits for an antiviral interferon response, but the perturbed factor is
+not a human gene and so cannot be an upstream regulator in the intended sense.
+
+We do not have to spot these by eye. Because the annotation could not assign a
+human Entrez ID to a viral protein, the `entrez_gene_id` column is `NA` for
+exactly these cases, so we can filter them out explicitly:
+
+```{r filter-nonhuman}
+scored <- regulatorTable(regulatorResults)
+
+nonhuman <- scored[is.na(scored$entrez_gene_id), ]
+nonhuman[, c("pert_symbol", "pert_type", "score", "zscore")]
+```
+
+Here the two strongest positive hits are the adenoviral protein *E4ORF3* and
+the herpesviral protein *ICP0*, both known modulators of innate immune
+signalling. Keeping only the rows with a human Entrez ID leaves the top
+*human* candidate regulators:
+
+```{r human-only}
+human_hits <- scored[!is.na(scored$entrez_gene_id), ]
+human_hits <- human_hits[order(-abs(human_hits$zscore)), ]
+head(human_hits[, c("pert_symbol", "pert_type", "score", "zscore")])
+```
+
+The strongest human hits are the DNA-sensing and interferon machinery:
+*STING1* (cGAS-STING pathway), *IFI16*, and *IRF1*. Their reference
+signatures are knockouts or knockdowns whose scores are *negative*
+(reversing): removing an antiviral regulator produces the opposite of the
+interferon response, exactly the relationship expected if that regulator is
+required for the response.
+
+We can filter at the PerturbMatch object level also:
+```{r filter-perturbMatch}
+keep <- !is.na(rowData(regulatorResults)$entrez_gene_id)
+regulatorResults <- regulatorResults[keep, ]
+```
+
+
+# Visualise the results
+
+```{r plot-similarity, fig.width=7}
+plotSimilarity(regulatorResults, topN = 20)
+```
+
+Setting `inferActivity = TRUE` flips the sign of the knockdown/knockout
+signatures, so the antiviral regulators move to the mimicking side: the data
+are consistent with interferon stimulation *increasing* the activity of
+*STING1*, *IFI16*, and *IRF1*.
+
+```{r plot-similarity-activity, fig.width=7}
+plotSimilarity(regulatorResults, topN = 20, inferActivity = TRUE)
+```
+
+# Cell-level scoring with singscore
+
+perturbMatch ranks regulators from the aggregated pseudobulk signature,
+which collapses every cell in a sample to a single value. This
+hides any variation between cells.
+`r Biocpkg("singscore")` scores each individual cell against a gene
+signature, so we can bring a candidate regulator back down to the
+single-cell level and look at how its activity is distributed across the
+population rather than assuming it is uniform.
+
+The reference contains both a *STING1* overexpression and a *STING1* knockout
+signature. They sit on opposite sides of the raw perturbMatch score, the
+overexpression *mimicking* the interferon response and the knockout
+*reversing* it, but the two are concordant once the direction of each
+perturbation is taken into account: both say that interferon stimulation
+raises *STING1* activity. We use the knockout here because it is the much
+stronger, higher-confidence hit.
+
+Because the signature is a knockout, its direction is inverted relative to
+STING1 activity. A knockout lowers its target's pathway, so the genes it
+pushes *up* mark *loss* of STING1 signalling and the genes it pushes *down*
+mark *active* signalling. To score STING1 activity we therefore reverse the
+two sets: the knockout's down-genes become the activity up-set and its
+up-genes become the down-set. Because we relabelled nothing, these are gene
+symbols, matching the row names of the single-cell object.
+
+```{r sting-signature}
+sting_col <- "GSE129436_STING1_KO_1"
+sting_lfc <- as.numeric(assay(demo_expression_db, "log2fc")[, sting_col])
+symbols <- rowData(demo_expression_db)$Symbol
+
+ord <- order(sting_lfc)
+n <- 100
+ko_down <- symbols[head(ord, n)]   # most decreased by the STING1 knockout
+ko_up   <- symbols[tail(ord, n)]   # most increased by the STING1 knockout
+
+# Reverse the knockout to score STING1 *activity*: genes that fall when
+# STING1 is knocked out are the ones that mark active STING1 signalling.
+sting_up   <- ko_down
+sting_down <- ko_up
+```
+
+singscore ranks all genes within each cell, so we work on log-normalised
+counts and restrict to reasonably detected genes to keep the matrix compact.
+The result is one *STING1* activity score per cell.
+
+```{r singscore}
+sce <- logNormCounts(sce)
+sce <- sce[rowSums(counts(sce) > 0) >= 10, ]
+
+sting_up   <- intersect(sting_up, rownames(sce))
+sting_down <- intersect(sting_down, rownames(sce))
+
+ranked <- rankGenes(as.matrix(logcounts(sce)))
+sce$STING1_activity <- simpleScore(
+    ranked, upSet = sting_up, downSet = sting_down
+)$TotalScore
+```
+
+To see how that activity is spread across the population, we embed the cells
+with a UMAP. We first reduce the data with PCA and then run UMAP on the
+principal components.
+
+```{r umap-compute}
+set.seed(1)
+sce <- runPCA(sce, ncomponents = 20)
+sce <- runUMAP(sce, dimred = "PCA")
+
+umap_df <- data.frame(
+    reducedDim(sce, "UMAP"),
+    STING1_activity = sce$STING1_activity,
+    stim = sce$stim
+)
+colnames(umap_df)[1:2] <- c("UMAP1", "UMAP2")
+```
+
+Colouring one point per cell is unreadable with several thousand overlapping
+cells, so we bin the UMAP into hexagons and colour each hexagon by the *mean*
+*STING1* activity score of the cells in it. A single-hue scale from near-white
+to dark blue, with the limits clipped so a few extreme cells cannot dominate
+it, makes the gradient across the population clear.
+
+```{r umap-plot, fig.width=9, fig.height=3.8}
+p_activity <- ggplot(umap_df, aes(UMAP1, UMAP2, z = STING1_activity)) +
+    stat_summary_hex(bins = 50, fun = mean) +
+    scale_fill_gradient(
+        low = "#EAF3FB", high = "#08519C",
+        limits = c(0, 0.5), oob = scales::squish,
+        name = "Mean\nSTING1\nactivity"
+    ) +
+    labs(title = "STING1 activity") +
+    theme_bw()
+
+p_condition <- ggplot(umap_df, aes(UMAP1, UMAP2, colour = stim)) +
+    geom_point(size = 0.35, alpha = 0.6) +
+    scale_colour_manual(values = c(ctrl = "#4C72B0", stim = "#DD8452")) +
+    guides(colour = guide_legend(override.aes = list(size = 2, alpha = 1))) +
+    labs(title = "Condition") +
+    theme_bw()
+
+cowplot::plot_grid(p_activity, p_condition, nrow = 1)
+```
+
+The stimulated and control monocytes separate into two clusters, and the
+*STING1* activity is raised across the stimulated cluster, confirming at
+single-cell resolution the regulator that perturbMatch flagged from the
+pseudobulk signature. The binned view also exposes heterogeneity that the
+pseudobulk value hides: the score is graded rather than uniform, so some
+regions of the stimulated cluster carry a stronger *STING1* programme than
+others.
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```
