@@ -1,5 +1,7 @@
 # perturbMatch
 
+[![Test R-universe](https://github.com/soulj/perturbMatch/actions/workflows/r-universe.yml/badge.svg)](https://github.com/soulj/perturbMatch/actions/workflows/r-universe.yml)
+
 **Match a transcriptomics signature to single-gene perturbation reference databases.**
 
 `perturbMatch` matches a query gene signature (e.g. a differential-expression
