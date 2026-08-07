@@ -16,7 +16,7 @@ Description: Matches a query transcriptomics signature against a reference
     supplied as HDF5-backed SummarizedExperiment objects for memory-efficient
     handling of large perturbation collections, and helper functions rank and
     visualise the best-matching regulators.
-Depends: R (>= 4.5.0)
+Depends: R (>= 4.6.0)
 Imports:
     methods,
     AnnotationDbi,
