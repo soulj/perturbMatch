@@ -54,9 +54,9 @@ library(ggplot2)
 perturbMatch analyses a differential expression signature regardless of
 whether it came from bulk or single-cell RNA-seq. For single-cell data the
 recommended route is to aggregate counts into pseudobulk samples and run a
-standard differential expression analysis. This vignette follows that route on the Kang et al. PBMC dataset
-from `muscData`, comparing control and interferon-beta-stimulated CD14+
-monocytes.
+standard differential expression analysis. This vignette follows that route
+on the Kang et al. PBMC dataset from `muscData`, comparing control and
+interferon-beta-stimulated CD14+ monocytes.
 
 The bulk RNA-seq vignette (`vignette("perturbMatch")`) introduces the
 reference database, scoring methods, and plotting functions in more detail.
