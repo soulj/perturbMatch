@@ -940,6 +940,18 @@ knitr::kable(
 )
 ```
 
+# Citation
+
+If you use perturbMatch, please cite:
+
+Soul J, Young DA (2026). Automated generation of a gene perturbation
+transcriptomic atlas using large language models. *bioRxiv*.
+[doi:10.64898/2026.08.08.743502](https://doi.org/10.64898/2026.08.08.743502)
+
+```{r citation, eval=FALSE}
+citation("perturbMatch")
+```
+
 # Session information
 
 This vignette was compiled using:

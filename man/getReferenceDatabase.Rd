@@ -35,7 +35,9 @@ retrieved from. \code{"experimenthub"} takes it from Bioconductor's
 \code{"zenodo"} downloads it from the Zenodo deposit instead.
 \code{"auto"} (the default) uses ExperimentHub, falling back to Zenodo
 only when the records are absent from the hub, and announces which of the
-two it used. Ignored when \code{demo = TRUE}.}
+two it used. The records are registered for Bioconductor 3.24 and later,
+so an older release reaches the data through the Zenodo fallback.
+Ignored when \code{demo = TRUE}.}
 
 \item{cacheDir}{Directory holding the \pkg{BiocFileCache} cache of
 downloaded reference files. Defaults to a per-user cache directory

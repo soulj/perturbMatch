@@ -10,3 +10,5 @@ dist/
 *.Rcheck/
 *.tar.gz
 .claude/
+
+/.quarto/

@@ -21,7 +21,9 @@
 #'   \code{"zenodo"} downloads it from the Zenodo deposit instead.
 #'   \code{"auto"} (the default) uses ExperimentHub, falling back to Zenodo
 #'   only when the records are absent from the hub, and announces which of the
-#'   two it used. Ignored when \code{demo = TRUE}.
+#'   two it used. The records are registered for Bioconductor 3.24 and later,
+#'   so an older release reaches the data through the Zenodo fallback.
+#'   Ignored when \code{demo = TRUE}.
 #' @param cacheDir Directory holding the \pkg{BiocFileCache} cache of
 #'   downloaded reference files. Defaults to a per-user cache directory
 #'   (\code{tools::R_user_dir("perturbMatch", "cache")}). Only used by the
@@ -134,9 +136,9 @@ getReferenceDatabase <- function(
     if (is.null(parts)) {
         if (source == "auto") {
             message(
-                "The perturbMatchData records are not on ExperimentHub yet. ",
-                "Falling back to the Zenodo deposit; pass ",
-                "source = \"zenodo\" to select it directly."
+                "The perturbMatchData records are not on the ExperimentHub ",
+                "of this Bioconductor version. Falling back to the Zenodo ",
+                "deposit. Pass source = \"zenodo\" to select it directly."
             )
         }
         parts <- .fetchDownload(key, cacheDir, ask)
@@ -240,9 +242,9 @@ getReferenceDatabase <- function(
             stop(
                 "No ExperimentHub record titled ",
                 paste0("'", absent, "'", collapse = ", "),
-                " found. The perturbMatchData package may not yet be ",
-                "available on ExperimentHub; use source = \"zenodo\" in ",
-                "the interim.",
+                " found. The records are registered for Bioconductor 3.24 ",
+                "and later, so an older release will not see them. Use ",
+                "source = \"zenodo\" to take the deposit directly.",
                 call. = FALSE
             )
         }

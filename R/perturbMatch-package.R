@@ -24,5 +24,10 @@
 #'
 #' @author Jamie Soul \email{jamie.soul@@liverpool.ac.uk}
 #'
+#' @references
+#' Soul J, Young DA (2026). Automated generation of a gene perturbation
+#' transcriptomic atlas using large language models. \emph{bioRxiv}.
+#' \doi{10.64898/2026.08.08.743502}
+#'
 #' @keywords internal
 "_PACKAGE"

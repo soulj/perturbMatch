@@ -1,0 +1,21 @@
+citHeader("To cite perturbMatch in publications, please use:")
+
+bibentry(
+    bibtype  = "Article",
+    title    = paste("Automated generation of a gene perturbation transcriptomic",
+                     "atlas using large language models"),
+    author   = c(
+        person("Jamie", "Soul"),
+        person(c("David", "A."), "Young")
+    ),
+    journal  = "bioRxiv",
+    year     = "2026",
+    doi      = "10.64898/2026.08.08.743502",
+    url      = "https://doi.org/10.64898/2026.08.08.743502",
+    textVersion = paste(
+        "Soul J, Young DA (2026).",
+        "Automated generation of a gene perturbation transcriptomic atlas",
+        "using large language models. bioRxiv.",
+        "doi:10.64898/2026.08.08.743502"
+    )
+)

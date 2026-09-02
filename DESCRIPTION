@@ -1,7 +1,7 @@
 Package: perturbMatch
 Type: Package
 Title: Match Transcriptomics Signatures to Single-Gene Perturbation References
-Version: 0.99.0
+Version: 0.99.1
 Authors@R: c(
     person("Jamie", "Soul", role = c("aut", "cre"), email = "jamie.soul@liverpool.ac.uk", 
            comment = c(ORCID = "0000-0003-2255-6459")),
@@ -46,6 +46,7 @@ RoxygenNote: 7.3.2
 Encoding: UTF-8
 Suggests:
     testthat,
+    curl,
     rmarkdown,
     BiocStyle,
     knitr,

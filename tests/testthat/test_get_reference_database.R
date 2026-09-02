@@ -252,6 +252,30 @@ test_that("each reference resolves to three ExperimentHub record titles", {
     }
 })
 
+# The record titles are the contract with perturbMatchData. Every other hub
+# test here is mocked, so this is what would notice one being renamed.
+# skip_if_offline() also skips on CRAN, which would take this out of the
+# Bioconductor builds, so the connectivity check is made directly.
+test_that("every reference resolves against the hosted records", {
+    skip_if_not_installed("curl")
+    skip_if(!curl::has_internet(), "no internet connection")
+
+    hub <- ExperimentHub::ExperimentHub()
+    hosted <- hub[ExperimentHub::package(hub) == "perturbMatchData"]$title
+
+    # The hub only offers records up to the running Bioconductor version, so an
+    # older release sees none of them. That is not a renamed title.
+    skip_if(
+        length(hosted) == 0L,
+        "perturbMatchData is not on the hub of this Bioconductor version"
+    )
+
+    for (key in referenceKeys) {
+        titles <- perturbMatch:::.referenceTitles(key)
+        expect_true(all(titles %in% hosted), info = key)
+    }
+})
+
 test_that("source = 'auto' falls back to Zenodo only when records are absent", {
     fellBack <- FALSE
     local_mocked_bindings(
@@ -266,7 +290,7 @@ test_that("source = 'auto' falls back to Zenodo only when records are absent", {
 
     expect_message(
         se <- getReferenceDatabase(type = "chrdir"),
-        "not on ExperimentHub yet"
+        "Falling back to the Zenodo deposit"
     )
 
     expect_true(fellBack)
