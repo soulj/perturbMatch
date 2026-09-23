@@ -76,9 +76,9 @@ matched regulators is available through `regulatorGSEA()` and
 
 ## Learn more
 
-- Full walkthrough: the package vignettes, listed with
-  `vignette(package = "perturbMatch")` and opened with
-  `browseVignettes("perturbMatch")`.
+- Full walkthrough:
+  [bulk RNA-seq](https://biocstaging.r-universe.dev/articles/perturbMatch/perturbMatch.html),
+  [single-cell](https://biocstaging.r-universe.dev/articles/perturbMatch/perturbMatch_singlecell_vignette.html)
 - Function help: `?calcEnrichment`, `?prepareQuery`, `?plotSimilarity`.
 
 ## Citation
